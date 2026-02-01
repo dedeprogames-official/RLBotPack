@@ -14,12 +14,10 @@ def _safe_line(agent, a, b, color=(255, 255, 255)):
         agent.line(a, b, color)
         return True
     except Exception:
-        # se sua versão usa renderer direto, você pode adaptar aqui
         return False
 
 
 def _draw_circle(agent, center, radius=250, color=(255, 255, 255), steps=24, z_override=None):
-    # desenha círculo aproximado com linhas
     pts = []
     z = center.z if z_override is None else z_override
     for i in range(steps + 1):
@@ -33,15 +31,12 @@ def _draw_circle(agent, center, radius=250, color=(255, 255, 255), steps=24, z_o
 def _draw_arrow(agent, start, end, color=(255, 255, 255), head_len=180, head_angle_deg=28):
     _safe_line(agent, start, end, color)
 
-    # cabeça da seta no "end"
     dir_vec = (end - start)
     if dir_vec.magnitude() < 1:
         return
     d = dir_vec.normalize()
 
-    # cria 2 vetores laterais no plano XY
     ang = math.radians(head_angle_deg)
-    # rotaciona d no plano XY
     left = Vector3(
         d.x * math.cos(ang) - d.y * math.sin(ang),
         d.x * math.sin(ang) + d.y * math.cos(ang),
@@ -60,11 +55,6 @@ def _draw_arrow(agent, start, end, color=(255, 255, 255), head_len=180, head_ang
 
 
 def _draw_text_3d(agent, location, text, color=(255, 255, 255)):
-    """
-    GoslingUtils normalmente tem renderer interno, mas algumas versões expõem helpers.
-    Tentamos várias opções sem quebrar.
-    """
-    # tenta métodos comuns
     for attr in ["draw_string_3d", "string", "text", "draw_text_3d"]:
         fn = getattr(agent, attr, None)
         if callable(fn):
@@ -74,16 +64,12 @@ def _draw_text_3d(agent, location, text, color=(255, 255, 255)):
             except Exception:
                 pass
 
-    # tenta renderer
     renderer = getattr(agent, "renderer", None)
     if renderer is not None:
         for attr in ["draw_string_3d", "draw_string_2d", "draw_string"]:
             fn = getattr(renderer, attr, None)
             if callable(fn):
                 try:
-                    # muitas versões: draw_string_3d(x,y,z, scaleX, scaleY, text, color)
-                    # outras: draw_string_3d(vec, scale, text, color)
-                    # vamos tentar formatos
                     try:
                         fn(location, 1, 1, text, color)
                         return True
@@ -106,7 +92,6 @@ def _draw_text_3d(agent, location, text, color=(255, 255, 255)):
 GRAVITY_Z = -650.0  # Rocket League approx
 
 def _ballistic_ball_pos(ball_loc, ball_vel, dt):
-    # movimento simples sem bounce (serve p/ debug render)
     return Vector3(
         ball_loc.x + ball_vel.x * dt,
         ball_loc.y + ball_vel.y * dt,
@@ -125,11 +110,9 @@ def _sample_ball_path(ball_loc, ball_vel, t_end, step=0.10):
     vel = ball_vel
     while t < t_end:
         pts.append(loc)
-        # integra
         loc = _ballistic_ball_pos(loc, vel, step)
         vel = _ballistic_ball_vel(vel, step)
 
-        # clamp chão (sem bounce real, mas evita "z negativa" no debug)
         if loc.z < 0:
             loc = Vector3(loc.x, loc.y, 0)
             vel = Vector3(vel.x, vel.y, 0)
@@ -148,10 +131,6 @@ def _cap(x, lo, hi):
 
 
 def _eta_to_point(agent, car, point):
-    """
-    ETA simples: distância / velocidade + penalidade por ângulo.
-    Bom o suficiente pra rotação/commit.
-    """
     to = point - car.location
     dist = to.magnitude()
     if dist < 1:
@@ -163,9 +142,7 @@ def _eta_to_point(agent, car, point):
     speed = max(300.0, car.velocity.magnitude())
     base = dist / speed
 
-    # penaliza giro
-    turn_penalty = (angle / math.pi) * 1.2  # até +1.2s
-    # penaliza se estiver quase parado
+    turn_penalty = (angle / math.pi) * 1.2
     slow_penalty = 0.3 if speed < 900 else 0.0
 
     return base + turn_penalty + slow_penalty
@@ -176,19 +153,18 @@ def _role_and_ranks(agent):
     Retorna:
       - my_role: "FIRST" / "SECOND" / "THIRD"
       - i_am_last_man: bool (mais perto do nosso gol)
-      - etas: lista (player_index, eta)
-      - goal_dists: lista (player_index, dist_own_goal)
+      - etas_sorted
+      - goal_sorted
+      - have_mates: bool (tem teammate além de mim)
     """
-    friends = list(getattr(agent, "friends", []))
+    # garante que friends não inclui "me"
+    raw_friends = list(getattr(agent, "friends", []))
+    friends = [f for f in raw_friends if getattr(f, "index", None) != agent.me.index]
+    have_mates = len(friends) > 0
+
     players = [agent.me] + friends
     ball_loc = agent.ball.location
     own_goal = agent.friend_goal.location
-
-    # 1v1: não existe rotação 1/2/3 man; evitar comportamento "chuta e volta pro gol" sempre
-    if len(players) == 1:
-        eta = _eta_to_point(agent, agent.me, ball_loc)
-        gd = (agent.me.location - own_goal).magnitude()
-        return "FIRST", False, [(agent.me.index, eta)], [(agent.me.index, gd)]
 
     etas = []
     goal_dists = []
@@ -200,16 +176,17 @@ def _role_and_ranks(agent):
     etas_sorted = sorted(etas, key=lambda x: x[1])
     goal_sorted = sorted(goal_dists, key=lambda x: x[1])
 
-    # rank do meu index na lista de ETA
     my_idx = agent.me.index
     my_rank_eta = [i for i, (idx, _) in enumerate(etas_sorted) if idx == my_idx][0]
     my_rank_goal = [i for i, (idx, _) in enumerate(goal_sorted) if idx == my_idx][0]
 
-    # regra simples p/ role:
-    # - FIRST: menor ETA
-    # - THIRD: mais perto do próprio gol (last man)
-    # - SECOND: resto
     i_am_last_man = (my_rank_goal == 0)
+
+    # Ajuste específico (pra 1v1 e evitar "chuta -> recua gol -> chuta -> recua"):
+    # sem mates, você precisa ser FIRST (pressão) e só recuar quando threat alto.
+    if not have_mates:
+        my_role = "FIRST"
+        return my_role, i_am_last_man, etas_sorted, goal_sorted, have_mates
 
     if my_rank_eta == 0 and not i_am_last_man:
         my_role = "FIRST"
@@ -218,16 +195,10 @@ def _role_and_ranks(agent):
     else:
         my_role = "SECOND"
 
-    return my_role, i_am_last_man, etas_sorted, goal_sorted
+    return my_role, i_am_last_man, etas_sorted, goal_sorted, have_mates
 
 
 def _threat_level(agent):
-    """
-    Heurística de perigo:
-    - bola indo pro nosso gol
-    - bola no nosso lado
-    - oponente com ETA menor que o nosso
-    """
     s = side(agent.team)
 
     ball = agent.ball
@@ -238,7 +209,6 @@ def _threat_level(agent):
     ball_towards_our_goal = (ball.velocity.y * s) < -200
     ball_close_to_goal = (ball.location - own_goal).magnitude() < 2800
 
-    # melhor ETA do inimigo vs nosso
     foe_best_eta = 999
     for f in getattr(agent, "foes", []):
         foe_best_eta = min(foe_best_eta, _eta_to_point(agent, f, ball.location))
@@ -256,12 +226,6 @@ def _threat_level(agent):
 
 
 def _desired_approach_speed(agent, dist_to_ball, intercept_z, ball_vz):
-    """
-    Controle inteligente (4):
-    - Se intercepto é "baixo" → pode chegar mais rápido
-    - Se bola tá caindo ou vai quicar → reduz pra chegar na hora do toque
-    """
-    # base por distância
     if dist_to_ball > 2200:
         base = 2300
     elif dist_to_ball > 1400:
@@ -271,7 +235,6 @@ def _desired_approach_speed(agent, dist_to_ball, intercept_z, ball_vz):
     else:
         base = 1100
 
-    # bola no ar / caindo: desacelera mais pra timing
     if intercept_z > 160:
         base -= 400
     if ball_vz < -200 and intercept_z > 120:
@@ -281,31 +244,22 @@ def _desired_approach_speed(agent, dist_to_ball, intercept_z, ball_vz):
 
 
 def _choose_shot_target(agent, shot_kind):
-    # pra render/seta: um ponto “pra onde” queremos chutar
     if shot_kind == "goal":
         return agent.foe_goal.location
     if shot_kind == "clear":
-        # limpa pro lado oposto do centro (evita devolver pro meio)
         s = side(agent.team)
         x = 3800 if agent.ball.location.x < 0 else -3800
-        y = 1800 * s  # empurrando pra frente
+        y = 1800 * s
         return Vector3(x, y, 0)
+    if shot_kind == "wallshot":
+        return agent.foe_goal.location
     return agent.foe_goal.location
 
 
 def _shot_score(agent, shot, shot_kind="goal"):
-    """
-    (3) Scoring melhor:
-    - velocidade média até o intercepto
-    - alinhamento car->bola e bola->alvo
-    - penaliza altura se não tiver boost
-    - penaliza se for overcommit (threat alto)
-    """
     me = agent.me
-    ball = agent.ball
     now = agent.time
 
-    # intercept_time / ball_location existem nos shots do GoslingUtils normalmente
     intercept_time = getattr(shot, "intercept_time", None)
     ball_loc = getattr(shot, "ball_location", None)
 
@@ -316,7 +270,6 @@ def _shot_score(agent, shot, shot_kind="goal"):
     dist = (ball_loc - me.location).magnitude()
     avg_speed = dist / dt
 
-    # alinhamentos
     to_ball = (ball_loc - me.location)
     to_ball_n = to_ball.normalize() if to_ball.magnitude() > 1 else Vector3(0, 1, 0)
 
@@ -324,28 +277,23 @@ def _shot_score(agent, shot, shot_kind="goal"):
     ball_to_target = (target_point - ball_loc)
     ball_to_target_n = ball_to_target.normalize() if ball_to_target.magnitude() > 1 else Vector3(0, 1, 0)
 
-    # quanto o carro está “apontado” pro intercepto (aprox por local.y)
     local = me.local(to_ball)
-    facing = _cap(local.y / (to_ball.magnitude() + 1e-6), -1, 1)  # ~cos
+    facing = _cap(local.y / (to_ball.magnitude() + 1e-6), -1, 1)
     align = _cap(to_ball_n.dot(ball_to_target_n), -1, 1)
 
-    # ratio do find_hits (quando existir)
     ratio = getattr(shot, "ratio", 1.0)
 
-    # boost / altura
     height_penalty = 0.0
     if ball_loc.z > 220 and me.boost < 40:
         height_penalty += 0.7
     if ball_loc.z > 380 and me.boost < 60:
         height_penalty += 1.2
 
-    # risco (se jogo perigoso, evita commits ruins)
     threat = _threat_level(agent)
     risk_penalty = 0.0
     if threat > 0.9 and shot_kind == "goal":
         risk_penalty += 0.6
 
-    # score final
     score = (avg_speed * 0.55) + (ratio * 900) + (align * 500) + (facing * 300)
     score -= (height_penalty * 900)
     score -= (risk_penalty * 800)
@@ -374,212 +322,194 @@ def _shot_is_aerial(shot):
     return ("aerial" in name) or ("air" in name)
 
 
+def _shot_is_wall(shot):
+    name = shot.__class__.__name__.lower()
+    return ("wall" in name)
+
+
 def _has_routine(name):
     return name in globals() and callable(globals()[name])
 
 
 # ============================================================
-# (NOVO) AERIAL: escolher ponto futuro inteligente + tempo de chegar
+# Aerial inteligente: escolher intercepto futuro com tempo de preparo
 # ============================================================
 
-def _aerial_time_needed(agent, intercept_loc):
+def _aerial_required_time(agent, intercept_loc):
     """
-    Estimativa simples do tempo mínimo pro aerial acontecer com chance:
-    - inclui "setup" (alinhar + pular) e viagem horizontal/vertical
-    - escala por boost baixo (mais lento/menos controle)
+    Estima um tempo mínimo pra conseguir chegar num intercepto aéreo.
+    (sem mudar sua base, só garantindo que o aerial não é "cedo demais")
     """
     me = agent.me
+    to = intercept_loc - me.location
+    dist = to.magnitude()
 
-    dx = intercept_loc.x - me.location.x
-    dy = intercept_loc.y - me.location.y
-    d_xy = math.sqrt(dx * dx + dy * dy)
+    # penaliza giro (se alvo muito de lado/atrás)
+    local = me.local(to)
+    angle = abs(math.atan2(local.x, max(1e-6, local.y)))  # 0 alinhado
+    turn_pen = (angle / math.pi) * 0.55
 
-    h = max(0.0, intercept_loc.z - me.location.z)
+    # penaliza altura
+    z = max(0.0, intercept_loc.z - me.location.z)
+    height_pen = _cap(z / 900.0, 0.0, 1.0) * 0.75
 
-    setup = 0.55
-    travel = d_xy / 1700.0
-    climb = max(0.0, h - 140.0) / 900.0
-    margin = 0.10
+    # base por distância (aerial precisa de "tempo de spool")
+    base = dist / 1550.0  # ~ velocidade efetiva média no ar (aprox)
+    base = _cap(base, 0.55, 2.6)
 
-    t = setup + travel + climb + margin
+    # se boost baixo, exige mais tempo
+    boost = me.boost
+    boost_pen = 0.35 if boost < 40 else 0.15 if boost < 60 else 0.0
 
-    # boost baixo => precisa de mais tempo (aéreo mais lento e menos correção)
-    if me.boost < 55:
-        t *= 1.10
-    if me.boost < 35:
-        t *= 1.18
-    if me.boost < 20:
-        t *= 1.28
-
-    return t
+    return base + turn_pen + height_pen + boost_pen
 
 
-def _pick_best_aerial(agent, shots_dict):
+def _pick_best_aerial_shot(agent, shots_dict):
     """
-    Escolhe um shot AÉREO que:
-    - esteja no ar (z alto)
-    - seja futuro o suficiente para dar tempo de chegar
-    - maximize o score existente + bônus por 'margem de tempo'
+    Escolhe um aerial que dê tempo real de chegar.
+    Procura tanto em "goal" quanto "clear".
     """
     now = agent.time
-    me = agent.me
-
     best = None
     best_kind = None
     best_score = -999999
 
     for kind in ["goal", "clear"]:
         for shot in shots_dict.get(kind, []):
-            it = getattr(shot, "intercept_time", None)
-            il = getattr(shot, "ball_location", None)
-            if it is None or il is None:
+            intercept_time = getattr(shot, "intercept_time", None)
+            intercept_loc = getattr(shot, "ball_location", None)
+            if intercept_time is None or intercept_loc is None:
                 continue
 
-            # precisa estar no ar pra valer como aerial
-            if il.z < 260:
+            dt = intercept_time - now
+            if dt < 0.1:
                 continue
 
-            dt = it - now
-            if dt <= 0.0:
+            # só trata como aerial se for realmente alto ou class indicar
+            if not (_shot_is_aerial(shot) or intercept_loc.z > 250):
                 continue
 
-            need = _aerial_time_needed(agent, il)
-
-            # precisa ser um ponto futuro que dá tempo de chegar
-            if dt < (need + 0.08):
+            req = _aerial_required_time(agent, intercept_loc)
+            if dt < req:
                 continue
 
-            # muito longe no futuro costuma gerar aerial ruim/aleatório
-            if dt > 4.0:
-                continue
-
-            # score base do shot + bônus por ter folga de tempo (mas sem exagero)
-            base_sc = _shot_score(agent, shot, kind)
-            slack = _cap(dt - need, 0.0, 1.25)
-            sc = base_sc + slack * 220.0
-
-            # se boost muito baixo, exige ainda mais folga prática
-            if me.boost < 25 and slack < 0.35:
-                sc -= 600.0
-
+            sc = _shot_score(agent, shot, kind) + (dt * 40.0)  # leve bias pra "mais tempo" quando tudo igual
             if sc > best_score:
                 best = shot
-                best_score = sc
                 best_kind = kind
+                best_score = sc
 
     return best, best_kind, best_score
 
 
 # ============================================================
-# Rotinas custom (kickoff cheat) – sem depender de rotinas do lib
+# Wallshot: usar rotina do GoslingUtils se existir + render
 # ============================================================
+
+def _ball_near_wall(agent):
+    b = agent.ball.location
+    return (abs(b.x) > 3600) or (abs(b.y) > 4950)
+
+
+def _try_push_wallshot(agent):
+    """
+    Tenta acionar wallshot usando rotinas do GoslingUtils, sem quebrar se não existir.
+    Retorna True se conseguiu pushar algo.
+    """
+    if not (_has_routine("wall_shot") or _has_routine("wallshot") or _has_routine("wallShot")):
+        return False
+
+    target = agent.foe_goal.location
+
+    for nm in ["wall_shot", "wallshot", "wallShot"]:
+        fn = globals().get(nm, None)
+        if callable(fn):
+            try:
+                # tentativas de assinatura comuns
+                try:
+                    agent.push(fn(target))
+                    return True
+                except Exception:
+                    try:
+                        agent.push(fn(agent.foe_goal.left_post, agent.foe_goal.right_post))
+                        return True
+                    except Exception:
+                        try:
+                            agent.push(fn())
+                            return True
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    return False
+
+
+# ============================================================
+# Kickoff: não termina ao tocar na bola; termina quando kickoff_flag acabar
+# ============================================================
+
+class KickoffWrapper:
+    """
+    Mantém a lógica de kickoff rodando enquanto kickoff_flag estiver True.
+    Se a rotina kickoff() "acabar cedo" (ex: ao tocar a bola), a wrapper continua (recria) até o kickoff acabar.
+    """
+    def __init__(self):
+        self.inner = kickoff() if _has_routine("kickoff") else None
+
+    def run(self, agent):
+        if not agent.kickoff_flag:
+            return True  # pop quando o kickoff acabar
+
+        if self.inner is None:
+            # fallback simples: acelerar pra bola
+            to_ball = agent.ball.location - agent.me.location
+            local = agent.me.local(to_ball)
+            defaultPD(agent, local)
+            defaultThrottle(agent, 2300)
+            agent.controller.boost = True
+            return False
+
+        done = False
+        try:
+            done = bool(self.inner.run(agent))
+        except Exception:
+            done = False
+
+        # Se o kickoff() encerrou cedo (ex: tocou na bola), recria e continua até kickoff_flag acabar
+        if done:
+            self.inner = kickoff() if _has_routine("kickoff") else None
+
+        return False  # NUNCA pop enquanto kickoff_flag True
+
 
 class CheatKickoff:
     """
-    Vai “cheatar” no kickoff: avança até um ponto seguro e pronto pra pegar rebote.
+    Cheat no kickoff: vai pro spot e espera. Só termina quando kickoff_flag acabar.
     """
     def __init__(self, spot):
         self.spot = spot
 
     def run(self, agent):
+        #if not agent.kickoff_flag:
+        #    return True  # termina só quando kickoff acaba
+
         relative = self.spot - agent.me.location
         dist = relative.magnitude()
         local = agent.me.local(relative)
 
         defaultPD(agent, local)
-        defaultThrottle(agent, _cap(dist * 2, 0, 2300))
-        agent.controller.boost = (dist > 1400 and abs(local.x) < 250 and abs(local.y) > 800)
 
-        # termina quando chega
-        if dist < 250:
-            return True  # pop
-        return False
+        # chega rápido, mas ao chegar segura posição (não termina o kickoff)
+        #if dist > 250:
+        #    defaultThrottle(agent, _cap(dist * 2, 0, 2300))
+        #    agent.controller.boost = (dist > 1400 and abs(local.x) < 250 and abs(local.y) > 800)
+        #else:
+        #    defaultThrottle(agent, 0)
+        #    agent.controller.boost = False
+        #    agent.controller.handbrake = True  # segura bem
 
-
-# ============================================================
-# (NOVO) Wavedash (wayyshot) + render
-# ============================================================
-
-class WaveDash:
-    """
-    Wavedash simples por temporização + detecção de descida.
-    - 1) jump curto
-    - 2) espera cair
-    - 3) dodge pra frente quando perto do chão
-    """
-    def __init__(self):
-        self.t0 = None
-        self.phase = 0
-        self.dodge_t = None
-
-    def run(self, agent):
-        me = agent.me
-
-        # se já não está no chão ao iniciar, não força
-        if self.t0 is None:
-            self.t0 = agent.time
-            self.phase = 0
-            self.dodge_t = None
-            if not bool(getattr(me, "on_ground", True)):
-                return True
-
-        elapsed = agent.time - self.t0
-
-        # render
-        _draw_text_3d(agent, me.location + Vector3(0, 0, 140), "WAVEDASH", (255, 120, 255))
-
-        # defaults
-        agent.controller.throttle = 1.0
-        agent.controller.boost = False
-        agent.controller.handbrake = False
-        agent.controller.steer = 0.0
-        agent.controller.yaw = 0.0
-        agent.controller.roll = 0.0
-
-        # fase 0: jump curto
-        if self.phase == 0:
-            agent.controller.jump = True
-            agent.controller.pitch = -1.0
-            if elapsed > 0.08:
-                self.phase = 1
-            return False
-
-        # fase 1: solta jump e inclina pra frente
-        if self.phase == 1:
-            agent.controller.jump = False
-            agent.controller.pitch = -1.0
-            if elapsed > 0.22:
-                self.phase = 2
-            return False
-
-        # fase 2: espera cair e tocar perto do chão
-        if self.phase == 2:
-            agent.controller.jump = False
-            agent.controller.pitch = -1.0
-
-            # quando estiver descendo e perto do chão, executa dodge
-            if me.location.z < 28 and me.velocity.z < -50:
-                self.phase = 3
-                self.dodge_t = agent.time
-            # timeout (se algo der errado)
-            if elapsed > 1.20:
-                return True
-            return False
-
-        # fase 3: dodge curto pra frente
-        if self.phase == 3:
-            if self.dodge_t is None:
-                self.dodge_t = agent.time
-
-            dt = agent.time - self.dodge_t
-            agent.controller.pitch = -1.0
-            agent.controller.jump = (dt < 0.06)
-
-            if dt > 0.14:
-                return True
-            return False
-
-        return True
+        #return False
 
 
 # ============================================================
@@ -587,9 +517,15 @@ class WaveDash:
 # ============================================================
 
 class ExampleBot(GoslingAgent):
+    def initialize_agent(self):
+        super().initialize_agent()
+        self.allow_kickoff_reset = True   # permite setar kickoff 1x por kickoff
+        self.kickoff_committed = False    # já escolhemos papel nesse kickoff?
+        self.kickoff_role = None          # "TAKER" ou "CHEAT"
+
     def run(agent):
         # ======================
-        # State inicial
+        # Memória (não mexe na base; só adiciona o mínimo necessário)
         # ======================
         if not hasattr(agent, "dbg"):
             agent.dbg = {
@@ -601,25 +537,24 @@ class ExampleBot(GoslingAgent):
                 "shot_target": None
             }
 
-        # wavedash cooldown
-        if not hasattr(agent, "wd_last"):
-            agent.wd_last = -9999.0
+        # usado pra evitar loop "chuta -> recua gol" especialmente em 1v1
+        if not hasattr(agent, "last_commit_time"):
+            agent.last_commit_time = -999.0
+            agent.last_commit_kind = None
 
         me = agent.me
         ball = agent.ball
         s = side(agent.team)
 
         # ======================
-        # Role / rotação
+        # Role / rotação (1) - sem mudar o resto
         # ======================
-        my_role, i_am_last_man, etas_sorted, goal_sorted = _role_and_ranks(agent)
+        my_role, i_am_last_man, etas_sorted, goal_sorted, have_mates = _role_and_ranks(agent)
         threat = _threat_level(agent)
-
-        # texto da ação no carro (vai atualizando)
         agent.dbg["role"] = my_role
 
         # ======================
-        # RENDER base: linhas de debug do seu exemplo
+        # RENDER base: linhas
         # ======================
         try:
             left_test_a = Vector3(-4100 * s, ball.location.y, 0)
@@ -633,30 +568,24 @@ class ExampleBot(GoslingAgent):
         # Se já tem rotina rodando, só render e sai
         # ======================
         if len(agent.stack) > 0:
-            # render texto
             _draw_text_3d(agent, me.location + Vector3(0, 0, 120),
                           f"[{agent.dbg['role']}] {agent.dbg['action']}", (255, 255, 255))
             return
 
         # ======================
-        # KICKOFF avançado (8)
+        # KICKOFF avançado (8) + FIX término (não ao toque) + suporta 1v1/2v2/3v3
         # ======================
         if agent.kickoff_flag:
-            # quem é o taker? menor ETA da equipe
+            # quem é o taker? menor ETA da equipe (entre friends + me)
             my_is_taker = (etas_sorted[0][0] == me.index)
 
             if my_is_taker:
-                agent.dbg["action"] = "KICKOFF: TAKING"
-                if _has_routine("kickoff"):
-                    agent.push(kickoff())
-                else:
-                    # fallback: acelera reto pra bola
-                    agent.controller.throttle = 1
-                    agent.controller.boost = True
+                agent.dbg["action"] = "KICKOFF: TAKING (WRAPPED)"
+                agent.push(KickoffWrapper())
             else:
                 # cheat spot: ligeiramente à frente do meio, do nosso lado
                 cheat_spot = Vector3(0, -800 * s, 0)
-                agent.dbg["action"] = "KICKOFF: CHEAT"
+                agent.dbg["action"] = "KICKOFF: CHEAT (HOLD)"
                 agent.push(CheatKickoff(cheat_spot))
 
             _draw_text_3d(agent, me.location + Vector3(0, 0, 120),
@@ -664,7 +593,7 @@ class ExampleBot(GoslingAgent):
             return
 
         # ======================
-        # Targets e shots (3) + Aerials (6)
+        # Targets e shots (3) + Aerials inteligentes (6) + Wallshot
         # ======================
         targets = {
             "goal": (agent.foe_goal.left_post, agent.foe_goal.right_post),
@@ -675,14 +604,21 @@ class ExampleBot(GoslingAgent):
 
         best_shot, best_kind, best_score = _pick_best_shot(agent, shots)
 
+        # Aerial melhor: escolhe um ponto futuro que dá tempo (pedido)
+        best_aerial, best_aerial_kind, best_aerial_score = _pick_best_aerial_shot(agent, shots)
+
         # ======================
         # Intercept info p/ render (círculo / trajeto / seta)
         # ======================
         intercept_time = None
         intercept_loc = None
-        if best_shot is not None:
-            intercept_time = getattr(best_shot, "intercept_time", None)
-            intercept_loc = getattr(best_shot, "ball_location", None)
+
+        # se escolher aerial, render deve usar o intercept dele
+        chosen_for_render = best_aerial if best_aerial is not None else best_shot
+
+        if chosen_for_render is not None:
+            intercept_time = getattr(chosen_for_render, "intercept_time", None)
+            intercept_loc = getattr(chosen_for_render, "ball_location", None)
 
         agent.dbg["intercept_t"] = intercept_time
         agent.dbg["intercept_loc"] = intercept_loc
@@ -690,137 +626,157 @@ class ExampleBot(GoslingAgent):
         agent.dbg["shot_target"] = _choose_shot_target(agent, best_kind) if best_kind else None
 
         # ======================
-        # DECISÃO PRINCIPAL
+        # DECISÃO PRINCIPAL (mantém sua base; só corrige o loop e melhora aerial/wallshot)
         # ======================
 
-        # Regra de commit por rotação:
-        # - THIRD (last man) só comita em clear/save ou se ameaça baixa
+        # commit rule por rotação:
         can_commit_attack = (my_role != "THIRD") or (threat < 0.55)
 
-        # Se existe shot bom
-        if best_shot is not None:
-            is_aerial = _shot_is_aerial(best_shot)
-            z = intercept_loc.z if intercept_loc else 0
+        # Ajuste importante:
+        # O bloco "defesa porque role THIRD" só faz sentido quando EXISTE teammate.
+        # Em 1v1, isso causava o loop "chuta -> recua gol".
+        third_role_matters = have_mates
 
-            # (6) Aerial: agora escolhe ponto FUTURO inteligente que dá tempo de chegar
-            if is_aerial or z > 250:
-                aerial_shot, aerial_kind, aerial_sc = _pick_best_aerial(agent, shots)
+        # (1v1) Evitar "chuta -> recua" logo após commit: pequena janela de pressão (sem mudar resto)
+        just_committed = (agent.time - agent.last_commit_time) < 1.20
 
-                if aerial_shot is not None and me.boost >= 35 and can_commit_attack:
-                    # atualiza debug/intercept para render apontar pro ponto certo do aerial
-                    a_it = getattr(aerial_shot, "intercept_time", None)
-                    a_il = getattr(aerial_shot, "ball_location", None)
+        # ======================
+        # WALLSHOT (pedido) - tenta quando bola está na parede e não estamos em perigo alto
+        # ======================
+        if len(agent.stack) < 1 and _ball_near_wall(agent) and threat < 0.95:
+            # se temos boost razoável e podemos comitar (ou é 1v1 e threat baixo), tenta wallshot
+            if me.boost >= 25 and (can_commit_attack or not have_mates):
+                if _try_push_wallshot(agent):
+                    agent.dbg["action"] = "SHOT: WALLSHOT"
+                    agent.last_commit_time = agent.time
+                    agent.last_commit_kind = "wallshot"
+                    # forçar render de alvo wallshot
+                    agent.dbg["shot_kind"] = "wallshot"
+                    agent.dbg["shot_target"] = _choose_shot_target(agent, "wallshot")
 
-                    agent.dbg["intercept_t"] = a_it
-                    agent.dbg["intercept_loc"] = a_il
-                    agent.dbg["shot_kind"] = aerial_kind
-                    agent.dbg["shot_target"] = _choose_shot_target(agent, aerial_kind) if aerial_kind else None
+        # ======================
+        # AERIAL (pedido): só usa se o aerial escolhido dá tempo
+        # ======================
+        if len(agent.stack) < 1 and best_aerial is not None:
+            # usa aerial apenas se faz sentido (boost + commit ok) e não estamos em perigo absurdo
+            if me.boost >= 45 and (can_commit_attack or threat < 0.70):
+                agent.dbg["action"] = f"SHOT: AERIAL (SMART) ({best_aerial_kind})"
+                agent.push(best_aerial)
+                agent.last_commit_time = agent.time
+                agent.last_commit_kind = "aerial"
+                agent.dbg["shot_kind"] = best_aerial_kind
+                agent.dbg["shot_target"] = _choose_shot_target(agent, best_aerial_kind)
 
-                    agent.dbg["action"] = f"SHOT: AERIAL ({aerial_kind})"
-                    agent.push(aerial_shot)
+        # ======================
+        # GROUND SHOT / CLEAR (como antes)
+        # ======================
+        if len(agent.stack) < 1:
+            if best_shot is not None:
+                z = getattr(best_shot, "ball_location", Vector3(0, 0, 0)).z
+
+                # se é um shot do tipo wall já vindo do find_hits, também conta
+                if _shot_is_wall(best_shot) and threat < 0.95:
+                    agent.dbg["action"] = f"SHOT: WALL (HIT) ({best_kind})"
+                    agent.push(best_shot)
+                    agent.last_commit_time = agent.time
+                    agent.last_commit_kind = "wall"
                 else:
-                    agent.dbg["action"] = "HOLD: NO GOOD AERIAL POINT / SAFE ROTATION"
+                    if best_score > 500 and (can_commit_attack or not have_mates):
+                        agent.dbg["action"] = f"SHOT: GROUND ({best_kind})"
+                        agent.push(best_shot)
+                        agent.last_commit_time = agent.time
+                        agent.last_commit_kind = best_kind
+                    else:
+                        agent.dbg["action"] = "POSITION: WAIT / SUPPORT"
+
+        # ======================
+        # Sem rotina (ou após decidir não chutar): defesa / boost / support
+        # ======================
+        if len(agent.stack) < 1:
+            # 1v1: se acabou de chutar e threat não é alto, não recuar pro gol — faz pressão/posição no meio
+            if (not have_mates) and just_committed and threat < 0.95:
+                agent.dbg["action"] = "PRESSURE: POST-SHOT MID"
+                # ponto de pressão: um pouco atrás da bola (pra não overcommit), mas não no gol
+                pressure = Vector3(ball.location.x, ball.location.y - (1200 * s), 0)
+                pressure = Vector3(_cap(pressure.x, -3800, 3800), _cap(pressure.y, -3500, 3500), 0)
+
+                relative = pressure - me.location
+                dist = relative.magnitude()
+                local = me.local(relative)
+                defaultPD(agent, local)
+
+                # (4) speed control + não gastar boost à toa
+                desired_speed = _cap(dist * 2.0, 0, 2300)
+                dist_ball = (ball.location - me.location).magnitude()
+                desired_speed = min(desired_speed, _desired_approach_speed(agent, dist_ball, ball.location.z, ball.velocity.z))
+                defaultThrottle(agent, desired_speed)
+                agent.controller.boost = (dist > 2400 and abs(local.x) < 240 and abs(local.y) > 900 and me.boost > 20)
 
             else:
-                # (4) Speed control na aproximação
-                # Se o shot for cedo demais / perto demais, às vezes a gente chega “antes”.
-                # Então só comita se score ok e role permite.
-                if best_score > 500 and can_commit_attack:
-                    agent.dbg["action"] = f"SHOT: GROUND ({best_kind})"
-                    agent.push(best_shot)
-                else:
-                    agent.dbg["action"] = "POSITION: WAIT / SUPPORT"
+                # DEFESA: antes era "threat > 0.85 or my_role == THIRD"
+                # Agora só considera THIRD como defesa obrigatória quando há teammate (2v2/3v3).
+                if threat > 0.85 or (my_role == "THIRD" and third_role_matters):
+                    ball_towards_our_goal = (ball.velocity.y * s) < -150
+                    ball_close_goal = (ball.location - agent.friend_goal.location).magnitude() < 3200
 
-        # Sem shot: defesa / rotação / boost
-        if len(agent.stack) < 1:
-            # Perigo alto => defender
-            if threat > 0.85 or my_role == "THIRD":
-                # tenta usar save do GoslingUtils se existir e bola indo pro gol
-                ball_towards_our_goal = (ball.velocity.y * s) < -150
-                ball_close_goal = (ball.location - agent.friend_goal.location).magnitude() < 3200
-
-                if ball_towards_our_goal and ball_close_goal and _has_routine("save"):
-                    agent.dbg["action"] = "DEFENSE: SAVE ROUTINE"
-                    agent.push(save(agent.friend_goal.location))
-                else:
-                    # fallback: ir pro far post com velocidade controlada
-                    left_dist = (agent.friend_goal.left_post - me.location).magnitude()
-                    right_dist = (agent.friend_goal.right_post - me.location).magnitude()
-                    target = agent.friend_goal.left_post if left_dist < right_dist else agent.friend_goal.right_post
-
-                    # move um pouco pra fora do gol (far post + offset)
-                    target = Vector3(target.x, target.y, 0)
-
-                    agent.dbg["action"] = "DEFENSE: FAR POST / SHADOW"
-
-                    relative = target - me.location
-                    dist = relative.magnitude()
-                    local = me.local(relative)
-
-                    # (NOVO) wavedash quando sem boost e longe, pra acelerar sem gastar boost
-                    if (me.boost < 12 and dist > 2600 and me.velocity.magnitude() < 1050 and
-                        abs(local.x) < 220 and (agent.time - agent.wd_last) > 2.2 and
-                        bool(getattr(me, "on_ground", True))):
-                        agent.wd_last = agent.time
-                        agent.dbg["action"] = "MOVE: WAVEDASH"
-                        agent.push(WaveDash())
+                    if ball_towards_our_goal and ball_close_goal and _has_routine("save"):
+                        agent.dbg["action"] = "DEFENSE: SAVE ROUTINE"
+                        agent.push(save(agent.friend_goal.location))
                     else:
+                        left_dist = (agent.friend_goal.left_post - me.location).magnitude()
+                        right_dist = (agent.friend_goal.right_post - me.location).magnitude()
+                        target = agent.friend_goal.left_post if left_dist < right_dist else agent.friend_goal.right_post
+                        target = Vector3(target.x, target.y, 0)
+
+                        agent.dbg["action"] = "DEFENSE: FAR POST / SHADOW"
+
+                        relative = target - me.location
+                        dist = relative.magnitude()
+                        local = me.local(relative)
                         defaultPD(agent, local)
 
-                        # velocidade segura (não torrar boost)
                         speed = _cap(dist * 1.8, 0, 2000)
                         defaultThrottle(agent, speed)
                         agent.controller.boost = (dist > 2600 and abs(local.x) < 200 and abs(local.y) > 900 and me.boost > 30)
 
-            # Boost se estiver baixo e não for last man
-            elif me.boost < 30:
-                best_boost = None
-                best_val = -1.0
-                for boost in agent.boosts:
-                    if not boost.active:
-                        continue
-                    if not boost.large:
-                        continue
+                # Boost se estiver baixo e não for last man (em 1v1 isso vale também)
+                elif me.boost < 30:
+                    best_boost = None
+                    best_val = -1.0
+                    for boost in agent.boosts:
+                        if not boost.active:
+                            continue
+                        if not boost.large:
+                            continue
 
-                    me_to_boost = (boost.location - me.location).normalize()
-                    boost_to_goal = (agent.friend_goal.location - boost.location).normalize()
+                        me_to_boost = (boost.location - me.location).normalize()
+                        boost_to_goal = (agent.friend_goal.location - boost.location).normalize()
 
-                    val = boost_to_goal.dot(me_to_boost)
-                    if val > best_val:
-                        best_val = val
-                        best_boost = boost
+                        val = boost_to_goal.dot(me_to_boost)
+                        if val > best_val:
+                            best_val = val
+                            best_boost = boost
 
-                if best_boost is not None and _has_routine("goto_boost"):
-                    agent.dbg["action"] = "RESOURCE: GET BOOST (LARGE)"
-                    agent.push(goto_boost(best_boost, agent.friend_goal.location))
+                    if best_boost is not None and _has_routine("goto_boost"):
+                        agent.dbg["action"] = "RESOURCE: GET BOOST (LARGE)"
+                        agent.push(goto_boost(best_boost, agent.friend_goal.location))
 
-            # Support: posicionar mid/back post “inteligente”
-            else:
-                agent.dbg["action"] = "ROTATE: SUPPORT MID"
-                # spot de suporte: entre bola e nosso gol, um pouco pra trás
-                goal = agent.friend_goal.location
-                ball_to_goal = (goal - ball.location).normalize()
-                support = ball.location + ball_to_goal * 2200  # 2200 atrás da bola
-                support = Vector3(_cap(support.x, -3800, 3800), _cap(support.y, -5100, 5100), 0)
-
-                relative = support - me.location
-                dist = relative.magnitude()
-                local = me.local(relative)
-
-                # (NOVO) wavedash quando sem boost e longe, pra acelerar sem gastar boost
-                if (me.boost < 12 and dist > 2800 and me.velocity.magnitude() < 1050 and
-                    abs(local.x) < 220 and (agent.time - agent.wd_last) > 2.2 and
-                    bool(getattr(me, "on_ground", True))):
-                    agent.wd_last = agent.time
-                    agent.dbg["action"] = "MOVE: WAVEDASH"
-                    agent.push(WaveDash())
+                # Support: mid/back post “inteligente”
                 else:
+                    agent.dbg["action"] = "ROTATE: SUPPORT MID"
+                    goal = agent.friend_goal.location
+                    ball_to_goal = (goal - ball.location).normalize()
+                    support = ball.location + ball_to_goal * 2200
+                    support = Vector3(_cap(support.x, -3800, 3800), _cap(support.y, -5100, 5100), 0)
+
+                    relative = support - me.location
+                    dist = relative.magnitude()
+                    local = me.local(relative)
                     defaultPD(agent, local)
 
-                    # (4) speed control: se estiver “chegando na bola” (perto), desacelera
                     desired_speed = _cap(dist * 2.0, 0, 2300)
 
-                    # se muito perto da bola, ajusta timing
+                    # (4) speed control
                     dist_ball = (ball.location - me.location).magnitude()
                     desired_speed = min(desired_speed, _desired_approach_speed(agent, dist_ball, ball.location.z, ball.velocity.z))
 
@@ -828,14 +784,12 @@ class ExampleBot(GoslingAgent):
                     agent.controller.boost = (dist > 2600 and abs(local.x) < 240 and abs(local.y) > 900 and me.boost > 20)
 
         # ============================================================
-        # RENDER AVANÇADO (pedido do usuário)
+        # RENDER AVANÇADO (com wallshot também)
         # ============================================================
 
-        # texto no carro
         _draw_text_3d(agent, me.location + Vector3(0, 0, 120),
                       f"[{agent.dbg['role']}] {agent.dbg['action']} | threat={threat:.2f}", (255, 255, 255))
 
-        # se temos intercepto, desenha:
         it = agent.dbg["intercept_t"]
         il = agent.dbg["intercept_loc"]
         st = agent.dbg["shot_target"]
@@ -848,7 +802,6 @@ class ExampleBot(GoslingAgent):
             # 2) seta indicando direção do chute (alvo)
             if st is not None:
                 arrow_end = Vector3(st.x, st.y, 0)
-                # seta começa no círculo e aponta pro alvo (no chão)
                 _draw_arrow(agent, ground + Vector3(0, 0, 10), arrow_end + Vector3(0, 0, 10), color=(255, 180, 80))
 
             # 3) path da bola até o intercepto (no ar)
@@ -856,12 +809,20 @@ class ExampleBot(GoslingAgent):
             if dt > 0.05:
                 pts = _sample_ball_path(ball.location, ball.velocity, min(dt, 4.0), step=0.10)
 
-                # desenha polyline
+                # cor diferente se for wallshot
+                is_wall_context = ("WALL" in agent.dbg["action"].upper())
+                path_color = (255, 200, 255) if is_wall_context else (180, 255, 180)
+
                 for i in range(len(pts) - 1):
-                    _safe_line(agent, pts[i], pts[i + 1], (180, 255, 180))
+                    _safe_line(agent, pts[i], pts[i + 1], path_color)
 
                 # marca ponto exato do toque (il)
                 _draw_circle(agent, il, radius=120, color=(255, 255, 255), steps=18, z_override=il.z)
 
-                # linha do carro até o intercepto (visual “vou pra lá”)
+                # linha do carro até o intercepto
                 _safe_line(agent, me.location, il, (255, 255, 0))
+
+                # render extra wallshot: linha vertical até o chão + círculo no ponto da parede
+                if is_wall_context and il.z > 80:
+                    _safe_line(agent, Vector3(il.x, il.y, 0), il, (255, 200, 255))
+                    _draw_circle(agent, Vector3(il.x, il.y, 0), radius=140, color=(255, 200, 255), steps=18, z_override=10)
